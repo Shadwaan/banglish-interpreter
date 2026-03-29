@@ -1,0 +1,10 @@
+whisperx
+openai-whisper
+anthropic
+sounddevice
+scipy
+numpy
+pyaudio
+python-dotenv
+flask
+pyannote.audio

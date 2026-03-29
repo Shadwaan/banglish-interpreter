@@ -1,0 +1,8 @@
+.env
+API_KEYS.txt
+venv/
+__pycache__/
+*.pyc
+*_output.json
+*_output.txt
+raw_transcript.txt
