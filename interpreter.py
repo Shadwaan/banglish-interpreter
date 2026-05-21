@@ -23,7 +23,7 @@ from banglish_hints import CLAUDE_REFERENCE
 # Constants
 # ---------------------------------------------------------------------------
 MODEL = "claude-sonnet-4-20250514"
-MAX_TOKENS = 8192
+MAX_TOKENS = 16384
 
 SYSTEM_PROMPT = f"""\
 You are an expert Banglish interpreter. "Banglish" is Bengali (Bangla) \
@@ -94,9 +94,18 @@ def _build_user_message(
     ]
 
     if low_confidence_words:
-        lines.append("## Low-confidence words (probability < 0.65)")
+        # Cap to avoid blowing up the context window when Whisper hallucinates.
+        # Keep the LEAST confident words first (most likely to be wrong).
+        MAX_LOW_CONF = 200
+        sorted_words = sorted(low_confidence_words, key=lambda w: w.confidence)
+        shown = sorted_words[:MAX_LOW_CONF]
+        truncated = len(low_confidence_words) - len(shown)
+        header = "## Low-confidence words (probability < 0.65)"
+        if truncated > 0:
+            header += f" — showing {len(shown)} lowest of {len(low_confidence_words)} total"
+        lines.append(header)
         lines.append("")
-        for w in low_confidence_words:
+        for w in shown:
             lines.append(
                 f"- \"{w.word}\"  —  confidence {w.confidence:.2f}  "
                 f"[{w.start:.2f}s → {w.end:.2f}s]"

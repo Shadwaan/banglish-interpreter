@@ -173,6 +173,35 @@ def main():
     print(json.dumps(data, indent=2, ensure_ascii=False))
     print()
 
+    # -- Save output to files --
+    import os
+    audio_basename = os.path.splitext(os.path.basename(file_path))[0]
+    # Strip "_raw" suffix if present (we want the chat-ready file named after the audio)
+    if audio_basename.endswith("_raw"):
+        audio_basename = audio_basename[:-4]
+    output_dir = os.path.dirname(os.path.abspath(__file__))
+
+    txt_path = os.path.join(output_dir, f"{audio_basename}_output.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"BANGLISH INTERPRETER OUTPUT\n")
+        f.write(f"Source: {file_path}\n")
+        f.write(f"{'=' * 70}\n\n")
+        f.write("CLAUDE ASSESSMENT\n")
+        f.write(f"{'-' * 70}\n\n")
+        f.write(data.get("assessment", "-") + "\n")
+        f.write(f"\n\nWORD CORRECTIONS ({len(data.get('alternatives', []))})\n")
+        f.write(f"{'-' * 70}\n\n")
+        for i, alt in enumerate(data.get("alternatives", []), 1):
+            f.write(f'{i}. "{alt.get("original", "?")}" -> "{alt.get("replacement", "?")}"\n')
+            if alt.get("reason"):
+                f.write(f'   Reason: {alt["reason"]}\n')
+            f.write("\n")
+        f.write(f"\n{'=' * 70}\n")
+        f.write("CLEAN VERSION\n")
+        f.write(f"{'-' * 70}\n\n")
+        f.write(data.get("clean_version", raw_text) + "\n")
+    print(f"  {GREEN}Output saved to: {txt_path}{RESET}\n")
+
     print(f"{CYAN}{BAR}{RESET}")
     print(f"{CYAN}  DONE{RESET}")
     print(f"{CYAN}{BAR}{RESET}\n")

@@ -197,9 +197,31 @@ def main() -> None:
     # Stage 1: Whisper
     transcription = stage_transcribe(audio_path)
 
-    # Stage 2: Claude
+    # -- Save raw transcript IMMEDIATELY so it can't be lost ----------------
+    audio_basename = os.path.splitext(os.path.basename(audio_path))[0]
+    output_dir = os.path.dirname(os.path.abspath(__file__))
+    raw_path = os.path.join(output_dir, f"{audio_basename}_raw.txt")
+    with open(raw_path, "w", encoding="utf-8") as f:
+        if transcription.has_diarization:
+            for seg in transcription.diarized_segments:
+                f.write(f"[{seg.speaker}]: {seg.text}\n")
+        else:
+            f.write(transcription.raw_text + "\n")
+    print(f"  {GREEN}Raw transcript saved to: {raw_path}{RESET}\n")
+
+    # Stage 2: Claude (gracefully handle failures so raw output is still kept)
     interp = BanglishInterpreter()
-    interpretation = stage_interpret(transcription, interp)
+    try:
+        interpretation = stage_interpret(transcription, interp)
+    except Exception as e:
+        print(f"\n  {RED}[!] Claude interpretation failed: {e}{RESET}")
+        print(f"  {YELLOW}Raw transcript is still saved at: {raw_path}{RESET}\n")
+        interpretation = {
+            "assessment": f"Interpretation skipped: {e}",
+            "alternatives": [],
+            "changes_made": "",
+            "clean_version": transcription.raw_text,
+        }
 
     # Stage 3: Side-by-side
     stage_comparison(
