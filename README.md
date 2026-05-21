@@ -87,10 +87,34 @@ python extract_clean.py "<name>_output.txt" "<name>_chatready.txt"
 
 The repo intentionally **does not** include the `.env` file. Two API keys are required:
 
-- `ANTHROPIC_API_KEY` — for Claude (interpretation step)
-- `HF_TOKEN` — Hugging Face token for downloading pyannote diarization models
+### 1. `ANTHROPIC_API_KEY` (paid)
 
-Copy them from your Secrets folder (or wherever you stored them) into a `.env` file in the project root.
+For Claude — the model that cleans up the transcript.
+
+Get one from [console.anthropic.com](https://console.anthropic.com). Claude API usage is metered (a few cents per long transcript).
+
+### 2. `HF_TOKEN` (free, but requires extra setup)
+
+For Hugging Face — used to download the **pyannote speaker diarization** model.
+
+**One-time setup steps:**
+
+1. Create a free Hugging Face account at [huggingface.co](https://huggingface.co)
+2. Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and create a token with `Read` access
+3. Accept the pyannote model terms (one-click "Agree" on each page — required before the model will download):
+   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+
+Without this step the first run will fail with a 401 error when trying to load the diarization model.
+
+### Adding the keys
+
+Create a file called `.env` in the project root with:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+HF_TOKEN=hf_...
+```
 
 ---
 
