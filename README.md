@@ -1,0 +1,126 @@
+# Banglish Interpreter
+
+Audio-to-text pipeline that transcribes Banglish (Bengali written in Latin letters, often mixed with English) and produces a clean, chatbot-ready transcript.
+
+**Pipeline:**
+1. **Whisper** (via WhisperX) transcribes the audio
+2. **Speaker diarization** (via pyannote) labels who said what
+3. **Claude** cleans up Whisper's mistakes using Banglish-aware corrections
+
+---
+
+## Prerequisites
+
+- **Python 3.11+** — [python.org](https://www.python.org/downloads/)
+- **ffmpeg** — required for audio decoding
+  - **Windows:** download from [ffmpeg.org](https://www.gyan.dev/ffmpeg/builds/) and add to PATH
+  - **Mac:** `brew install ffmpeg`
+  - **Linux:** `sudo apt install ffmpeg`
+- **API keys** — Anthropic + Hugging Face (see [Secrets](#secrets) below)
+
+---
+
+## Setup on a new machine
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/Shadwaan/banglish-interpreter.git
+cd banglish-interpreter
+
+# 2. Create a virtual environment
+python -m venv venv
+
+# 3. Activate it
+# Windows:
+venv\Scripts\activate
+# Mac / Linux:
+source venv/bin/activate
+
+# 4. Install Python dependencies
+pip install -r requirements.txt
+
+# 5. Add your API keys (see "Secrets" below)
+#    Create a file called .env in this folder with:
+#    ANTHROPIC_API_KEY=sk-ant-...
+#    HF_TOKEN=hf_...
+```
+
+---
+
+## Usage
+
+### Transcribe an audio file
+
+```bash
+python test_audio.py "path/to/audio.m4a"
+```
+
+This produces three files in the project folder:
+
+| File | What it is |
+|---|---|
+| `<name>_raw.txt` | Raw Whisper transcript (saved immediately, survives crashes) |
+| `<name>_output.txt` | Full output: assessment + corrections + clean version |
+| `<name>_output.json` | Same as above, machine-readable JSON |
+
+Feed `<name>_output.txt` into any chatbot (Claude, ChatGPT, etc.) for context.
+
+### Re-run only the Claude step
+
+If the Claude cleanup failed but Whisper succeeded (raw file already exists):
+
+```bash
+python run_interpret_only.py "<name>_raw.txt"
+```
+
+### Recover a transcript from a malformed output
+
+If Claude's JSON got truncated or wrapped weirdly:
+
+```bash
+python extract_clean.py "<name>_output.txt" "<name>_chatready.txt"
+```
+
+---
+
+## Secrets
+
+The repo intentionally **does not** include the `.env` file. Two API keys are required:
+
+- `ANTHROPIC_API_KEY` — for Claude (interpretation step)
+- `HF_TOKEN` — Hugging Face token for downloading pyannote diarization models
+
+Copy them from your Secrets folder (or wherever you stored them) into a `.env` file in the project root.
+
+---
+
+## Performance notes
+
+Whisper transcription speed depends on hardware:
+
+| Hardware | Speed |
+|---|---|
+| **NVIDIA GPU with CUDA** | Fastest (~5x faster than CPU) |
+| **CPU only** (Intel or AMD) | ~30 min per audio file |
+| **Apple Silicon (M1/M2/M3)** | Works on CPU; partial MPS support |
+
+There's **no AMD-specific dependency** in this project. It runs on any x86/x64 or ARM machine.
+
+---
+
+## Project structure
+
+```
+banglish-interpreter/
+├── app.py                  # Flask web app (planned)
+├── main.py                 # CLI entry point
+├── test_audio.py           # Verbose pipeline runner (recommended)
+├── run_interpret_only.py   # Claude-only re-run on existing raw transcript
+├── extract_clean.py        # Recover clean text from broken outputs
+├── transcriber.py          # WhisperX + diarization wrapper
+├── interpreter.py          # Claude API client
+├── recorder.py             # Live audio recording helper
+├── banglish_hints.py       # Reference vocab + mishearing map for Claude
+├── config.py               # Loads env vars
+└── requirements.txt
+```
