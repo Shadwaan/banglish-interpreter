@@ -199,7 +199,8 @@ def main() -> None:
 
     # -- Save raw transcript IMMEDIATELY so it can't be lost ----------------
     audio_basename = os.path.splitext(os.path.basename(audio_path))[0]
-    output_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+    os.makedirs(output_dir, exist_ok=True)
     raw_path = os.path.join(output_dir, f"{audio_basename}_raw.txt")
     with open(raw_path, "w", encoding="utf-8") as f:
         if transcription.has_diarization:
@@ -235,8 +236,7 @@ def main() -> None:
     print()
 
     # -- Save output to files --------------------------------------------------
-    audio_basename = os.path.splitext(os.path.basename(audio_path))[0]
-    output_dir = os.path.dirname(os.path.abspath(__file__))
+    # (output_dir was set earlier when saving the raw transcript)
 
     # 1. Human-readable .txt
     txt_path = os.path.join(output_dir, f"{audio_basename}_output.txt")

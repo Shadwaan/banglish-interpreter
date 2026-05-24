@@ -55,15 +55,17 @@ pip install -r requirements.txt
 python test_audio.py "path/to/audio.m4a"
 ```
 
-This produces three files in the project folder:
+This produces three files inside the `outputs/` folder (auto-created):
 
 | File | What it is |
 |---|---|
-| `<name>_raw.txt` | Raw Whisper transcript (saved immediately, survives crashes) |
-| `<name>_output.txt` | Full output: assessment + corrections + clean version |
-| `<name>_output.json` | Same as above, machine-readable JSON |
+| `outputs/<name>_raw.txt` | Raw Whisper transcript (saved immediately, survives crashes) |
+| `outputs/<name>_output.txt` | Full output: assessment + corrections + clean version |
+| `outputs/<name>_output.json` | Same as above, machine-readable JSON |
 
-Feed `<name>_output.txt` into any chatbot (Claude, ChatGPT, etc.) for context.
+Feed `outputs/<name>_output.txt` into any chatbot (Claude, ChatGPT, etc.) for context.
+
+> The `outputs/` folder is gitignored — your transcripts stay local.
 
 ### Re-run only the Claude step
 
@@ -73,6 +75,8 @@ If the Claude cleanup failed but Whisper succeeded (raw file already exists):
 python run_interpret_only.py "<name>_raw.txt"
 ```
 
+Bare filenames are auto-resolved against the `outputs/` folder.
+
 ### Recover a transcript from a malformed output
 
 If Claude's JSON got truncated or wrapped weirdly:
@@ -80,6 +84,8 @@ If Claude's JSON got truncated or wrapped weirdly:
 ```bash
 python extract_clean.py "<name>_output.txt" "<name>_chatready.txt"
 ```
+
+Same auto-resolve applies — both args are looked up in `outputs/` if not found directly.
 
 ---
 

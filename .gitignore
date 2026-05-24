@@ -3,8 +3,4 @@ API_KEYS.txt
 venv/
 __pycache__/
 *.pyc
-*_output.json
-*_output.txt
-*_raw.txt
-*_chatready.txt
-raw_transcript.txt
+outputs/

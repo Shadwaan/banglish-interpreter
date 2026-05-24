@@ -1,9 +1,23 @@
 """Quick extractor: pull the clean transcript out of a botched JSON wrap."""
+import os
 import re
 import sys
 
-input_path = sys.argv[1]
+OUTPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+
+def resolve(path):
+    """Resolve a bare filename against ./outputs/ if it doesn't exist directly."""
+    if os.path.exists(path):
+        return path
+    alt = os.path.join(OUTPUTS_DIR, path)
+    return alt
+
+input_path = resolve(sys.argv[1])
 output_path = sys.argv[2]
+# If output path is a bare filename (no directory), drop it into outputs/
+if not os.path.dirname(output_path):
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    output_path = os.path.join(OUTPUTS_DIR, output_path)
 
 with open(input_path, 'r', encoding='utf-8') as f:
     content = f.read()

@@ -73,11 +73,21 @@ def extract_transcript(file_path):
 
 
 def main():
+    import os
     if len(sys.argv) < 2:
         print(f"Usage: python {sys.argv[0]} <transcript_file>")
         sys.exit(1)
 
     file_path = sys.argv[1]
+    # If file not found at the given path, also try inside ./outputs/
+    if not os.path.exists(file_path):
+        alt = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "outputs",
+            file_path,
+        )
+        if os.path.exists(alt):
+            file_path = alt
 
     print(f"\n{BOLD}  BANGLISH INTERPRETER -- CLAUDE ONLY{RESET}")
     print(f"  {'-' * 40}\n")
@@ -179,7 +189,8 @@ def main():
     # Strip "_raw" suffix if present (we want the chat-ready file named after the audio)
     if audio_basename.endswith("_raw"):
         audio_basename = audio_basename[:-4]
-    output_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+    os.makedirs(output_dir, exist_ok=True)
 
     txt_path = os.path.join(output_dir, f"{audio_basename}_output.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
