@@ -16,7 +16,7 @@ from typing import Any
 import anthropic
 
 import config
-from transcriber import LowConfidenceWord
+from transcriber import LowConfidenceWord, DiarizedSegment
 from banglish_hints import CLAUDE_REFERENCE
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,12 @@ written in Latin/English letters, frequently mixed with real English words \
 and phrases in the same sentence.
 
 You will receive:
-1. A raw transcript produced by OpenAI Whisper from spoken Banglish audio.
+1. A raw transcript produced by OpenAI Whisper from spoken Banglish audio. \
+   The transcript may arrive **either** as flat text **or** as a sequence of \
+   timestamped speaker-labelled lines of the form \
+   `[<start>s-<end>s] SPEAKER_XX: <text>`. When you see the timestamped \
+   form, treat each line as one segment of the conversation and **preserve \
+   speaker attribution** in your corrected output.
 2. A list of words Whisper was **uncertain** about (each with its confidence \
    score and timestamp).
 
@@ -50,7 +55,15 @@ outside the JSON). Use this exact schema:
 
 {{
   "assessment": "<1-3 sentence overall quality assessment of the transcript>",
-  "clean_version": "<full corrected transcript>",
+  "clean_version": "<full corrected transcript as one flat string>",
+  "clean_segments": [
+    {{
+      "start": <float seconds, copied from the input segment>,
+      "end":   <float seconds, copied from the input segment>,
+      "speaker": "<SPEAKER_XX, copied from the input segment>",
+      "text": "<your corrected text for that segment>"
+    }}
+  ],
   "alternatives": [
     {{
       "original": "<word Whisper produced>",
@@ -62,8 +75,19 @@ outside the JSON). Use this exact schema:
   "changes_made": "<short, human-readable summary of all changes>"
 }}
 
+`clean_segments` is **required only when the input arrives as timestamped \
+speaker-labelled lines** — emit exactly one segment per input line, copying \
+`start`, `end` and `speaker` verbatim from the input, and putting your \
+corrected text in `text`. When the input is flat text, return `clean_segments: \
+[]`.
+
+`clean_version` is always the flat-string form of the corrected transcript \
+(speaker labels included if they were present in the input). Keep `clean_version` \
+and `clean_segments` consistent with each other when both are populated.
+
 If the transcript looks correct and no changes are needed, return the same \
-text in "clean_version" and an empty "alternatives" list.
+text in "clean_version" (and pass-through segments in "clean_segments" if \
+input was segmented) and an empty "alternatives" list.
 
 ---
 
@@ -84,14 +108,35 @@ the surrounding context is Bengali.
 def _build_user_message(
     raw_text: str,
     low_confidence_words: list[LowConfidenceWord],
+    diarized_segments: list[DiarizedSegment] | None = None,
 ) -> str:
-    """Format the first user turn that delivers the transcript to Claude."""
+    """
+    Format the first user turn that delivers the transcript to Claude.
+
+    If `diarized_segments` is provided and non-empty, the transcript is sent
+    as one timestamped speaker-labelled line per segment:
+
+        [12.30s-15.80s] SPEAKER_00: hello kemon acho
+        [15.80s-17.20s] SPEAKER_01: bhalo achi
+
+    Otherwise the existing flat-text path is used (raw_text as one block).
+    """
     lines = [
         "## Raw Whisper transcript",
         "",
-        raw_text,
-        "",
     ]
+    if diarized_segments:
+        for seg in diarized_segments:
+            txt = (seg.text or "").strip()
+            if not txt:
+                continue
+            lines.append(
+                f"[{seg.start:.2f}s-{seg.end:.2f}s] {seg.speaker}: {txt}"
+            )
+        lines.append("")
+    else:
+        lines.append(raw_text)
+        lines.append("")
 
     if low_confidence_words:
         # Cap to avoid blowing up the context window when Whisper hallucinates.
@@ -127,7 +172,10 @@ def _parse_response(text: str) -> dict[str, Any]:
     Extract the JSON object from Claude's reply.
 
     Claude should return raw JSON, but we handle the case where it wraps
-    the response in markdown code fences just in case.
+    the response in markdown code fences just in case. Callers are
+    guaranteed to receive a dict with at least the standard keys; the
+    optional ``clean_segments`` field is defaulted to an empty list when
+    Claude omits it (e.g. flat-text input).
     """
     cleaned = text.strip()
 
@@ -136,21 +184,33 @@ def _parse_response(text: str) -> dict[str, Any]:
     if fence_match:
         cleaned = fence_match.group(1).strip()
 
+    parsed: dict[str, Any] | None = None
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
     except json.JSONDecodeError:
         # Last-ditch: try to find the first { … } block.
         brace_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if brace_match:
-            return json.loads(brace_match.group(0))
+            try:
+                parsed = json.loads(brace_match.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+
+    if parsed is None:
         # If all parsing fails, return a wrapper so callers always get a dict.
         return {
             "assessment": "Could not parse Claude's response as JSON.",
             "clean_version": text,
+            "clean_segments": [],
             "alternatives": [],
             "changes_made": "none (parse error)",
             "_raw_response": text,
         }
+
+    # Normalise: ensure clean_segments is always at least an empty list so
+    # downstream code doesn't have to special-case the flat-input path.
+    parsed.setdefault("clean_segments", [])
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +236,7 @@ class BanglishInterpreter:
         self,
         raw_text: str,
         low_confidence_words: list[LowConfidenceWord],
+        diarized_segments: list[DiarizedSegment] | None = None,
     ) -> dict[str, Any]:
         """
         Send the transcript + uncertain words to Claude and return a
@@ -187,14 +248,22 @@ class BanglishInterpreter:
             The full raw transcript string from Whisper.
         low_confidence_words : list[LowConfidenceWord]
             Words whose probability fell below the confidence threshold.
+        diarized_segments : list[DiarizedSegment], optional
+            Per-segment diarization output. When provided (and non-empty), the
+            transcript is delivered to Claude as timestamped speaker-labelled
+            lines, and Claude is expected to return a ``clean_segments`` array
+            with the same shape. When omitted, the flat-text path is used
+            (backward compat for ``run_interpret_only.py``).
 
         Returns
         -------
         dict
-            Keys: ``assessment``, ``clean_version``, ``alternatives``,
-            ``changes_made``.
+            Keys: ``assessment``, ``clean_version``, ``clean_segments``,
+            ``alternatives``, ``changes_made``.
         """
-        user_msg = _build_user_message(raw_text, low_confidence_words)
+        user_msg = _build_user_message(
+            raw_text, low_confidence_words, diarized_segments
+        )
 
         # Reset history for a fresh transcript.
         self.conversation_history = [

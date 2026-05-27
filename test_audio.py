@@ -138,6 +138,7 @@ def stage_interpret(
     data = interp.interpret(
         raw_text=result.raw_text,
         low_confidence_words=result.low_confidence_words,
+        diarized_segments=result.diarized_segments,
     )
     elapsed = time.time() - t0
 
@@ -278,6 +279,7 @@ def main() -> None:
         "audio_file": audio_path,
         "raw_transcript": transcription.raw_text,
         "diarized_transcript": transcription.diarized_text(),
+        "diarized_segments": [seg.to_dict() for seg in transcription.diarized_segments],
         "speakers": list(set(s.speaker for s in transcription.diarized_segments)),
         "low_confidence_count": len(transcription.low_confidence_words),
         "interpretation": interpretation,

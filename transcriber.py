@@ -24,7 +24,7 @@ LOW_CONFIDENCE_THRESHOLD = 0.65
 # Hallucination detection
 # ---------------------------------------------------------------------------
 
-def _remove_repeated_phrases(text: str, max_repeats: int = 3) -> str:
+def _remove_repeated_phrases(text: str, max_repeats: int = 2) -> str:
     """
     Remove phrases (1-6 words) that repeat more than `max_repeats` times
     consecutively. Whisper hallucinates by looping the same phrase over and
@@ -423,9 +423,9 @@ def transcribe_audio(
         txt = seg.text.strip()
         if not txt:
             continue
-        # Check against last 3 kept segments
+        # Check against last 5 kept segments
         is_dup = False
-        for prev in deduped_segments[-3:]:
+        for prev in deduped_segments[-5:]:
             if _seg_similar(txt, prev.text):
                 is_dup = True
                 break
