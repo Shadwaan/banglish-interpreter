@@ -42,6 +42,33 @@ FN_NAME = "transcribe"
 
 
 # ---------------------------------------------------------------------------
+# Raw transcript writer — mirrors what test_audio.py produces
+# ---------------------------------------------------------------------------
+
+def write_raw_txt(out_path: Path, data: dict) -> None:
+    """
+    Write a ``*_raw.txt`` with one segment per line in the same format
+    test_audio.py uses:  ``[SPEAKER_XX]: text``
+
+    Sources from ``data["diarized_segments"]``. No timestamps in this
+    file — it's a flat speaker-labelled transcript intended to be read
+    by humans and by the eval harness (``eval/pipeline_io.load_raw`` strips
+    the speaker prefix when computing WER).
+
+    If diarization is absent, falls back to dumping ``raw_transcript``.
+    """
+    segs = data.get("diarized_segments") or []
+    with open(out_path, "w", encoding="utf-8") as f:
+        if segs:
+            for seg in segs:
+                f.write(
+                    f"[{seg.get('speaker', 'Unknown')}]: {seg.get('text', '')}\n"
+                )
+        else:
+            f.write((data.get("raw_transcript") or "") + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Human-readable .txt formatter
 # ---------------------------------------------------------------------------
 
@@ -121,16 +148,31 @@ def write_output_txt(
             )
 
 
-def _backfill_txt_from_json(json_path: Path) -> Path:
-    """Read ``*_output.json`` and write the sibling ``*_output.txt``."""
+def _backfill_txt_from_json(json_path: Path) -> tuple[Path, Path]:
+    """
+    Read ``*_output.json`` and write the sibling ``*_output.txt`` AND the
+    sibling ``*_raw.txt`` (in the same outputs/ directory, named after the
+    audio: ``<basename>_raw.txt``).
+
+    Intentional overwrite — early cloud runs predate the .txt and _raw.txt
+    writers, so the on-disk siblings may be stale.
+    """
     if not json_path.exists():
         raise FileNotFoundError(json_path)
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    txt_path = json_path.with_suffix(".txt")
+
     audio_path = data.get("audio_file") or json_path.stem.replace("_output", "")
+
+    # *_output.txt — same path as the JSON with the suffix swapped.
+    txt_path = json_path.with_suffix(".txt")
     write_output_txt(txt_path, audio_path, data)
-    return txt_path
+
+    # *_raw.txt — derived from the audio basename (strip the "_output" suffix).
+    raw_path = json_path.parent / (json_path.stem.replace("_output", "") + "_raw.txt")
+    write_raw_txt(raw_path, data)
+
+    return txt_path, raw_path
 
 
 def main() -> None:
@@ -148,8 +190,9 @@ def main() -> None:
             print(f"Usage: python {sys.argv[0]} --write-txt <json_path>")
             sys.exit(1)
         json_path = Path(sys.argv[2])
-        txt_path = _backfill_txt_from_json(json_path)
+        txt_path, raw_path = _backfill_txt_from_json(json_path)
         print(f"  Wrote: {txt_path}")
+        print(f"  Wrote: {raw_path}")
         return
 
     audio_path = Path(sys.argv[1])
@@ -184,6 +227,11 @@ def main() -> None:
     txt_path = out_path.with_suffix(".txt")
     write_output_txt(txt_path, str(audio_path), result)
     print(f"  Wrote: {txt_path}")
+
+    # And a *_raw.txt for downstream tooling (eval harness reads from here).
+    raw_path = output_dir / f"{audio_path.stem}_raw.txt"
+    write_raw_txt(raw_path, result)
+    print(f"  Wrote: {raw_path}")
 
     # Quick sanity peek
     interp = result.get("interpretation", {}) or {}

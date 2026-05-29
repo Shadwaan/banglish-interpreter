@@ -75,6 +75,11 @@ app = modal.App(APP_NAME)
 @app.function(
     image=image,
     gpu="T4",
+    # 16 GB system RAM — hedge against the worker OOM that caused a
+    # silent Modal retry on the 25 MB Zayan update clip (Stage 2
+    # diarization on long Bengali-heavy audio can spike well past the
+    # 2 GB default).
+    memory=16384,
     secrets=[
         modal.Secret.from_name("huggingface-secret"),
         modal.Secret.from_name("anthropic-secret"),
