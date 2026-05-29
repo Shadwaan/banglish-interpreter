@@ -8,6 +8,11 @@ existing eval harness and any downstream tooling work unchanged.
 
 Usage:
     python cloud/transcribe_cloud.py "<path to .m4a / .wav / etc.>"
+
+Also supports back-filling a human-readable .txt from an existing JSON
+(no remote call) — useful for retrofitting earlier cloud runs:
+
+    python cloud/transcribe_cloud.py --write-txt "<path to *_output.json>"
 """
 
 from __future__ import annotations
@@ -36,10 +41,116 @@ APP_NAME = "banglish-cloud-transcriber"
 FN_NAME = "transcribe"
 
 
+# ---------------------------------------------------------------------------
+# Human-readable .txt formatter
+# ---------------------------------------------------------------------------
+
+def write_output_txt(
+    out_path: Path,
+    audio_path: str,
+    data: dict,
+) -> None:
+    """
+    Write the human-readable .txt that mirrors test_audio.py's format.
+
+    Difference from test_audio.py: the CLEAN VERSION section emits one
+    line per ``interpretation.clean_segments`` item with timestamps and
+    speaker, reflecting the v1.5 segment-aware schema:
+
+        [12.30s-15.80s] SPEAKER_00: corrected text
+
+    If ``clean_segments`` is empty (older runs or flat-text Stage 3) the
+    section falls back to the flat ``clean_version`` string.
+
+    NOTE: this is duplicated from the inline writer in ``test_audio.py``
+    by design — refactoring both to share a helper is a separate cleanup
+    (see v1.5 BUILD-LOG note on three-entry-point duplication).
+    """
+    interp = data.get("interpretation") or {}
+    diarized_segs = data.get("diarized_segments") or []
+    alternatives = interp.get("alternatives") or []
+    clean_segments = interp.get("clean_segments") or []
+
+    bar = "=" * 70
+    sub = "-" * 70
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("BANGLISH INTERPRETER OUTPUT\n")
+        f.write(f"Audio: {audio_path}\n")
+        f.write(f"{bar}\n\n")
+
+        f.write("SPEAKER-LABELED TRANSCRIPT\n")
+        f.write(f"{sub}\n\n")
+        if diarized_segs:
+            for seg in diarized_segs:
+                f.write(
+                    f"[{seg.get('speaker', 'Unknown')}]: {seg.get('text', '')}\n"
+                )
+        else:
+            f.write((data.get("raw_transcript") or "") + "\n")
+
+        f.write(f"\n\n{bar}\n")
+        f.write("CLAUDE ASSESSMENT\n")
+        f.write(f"{sub}\n\n")
+        f.write((interp.get("assessment") or "-") + "\n")
+
+        f.write(f"\n\nWORD CORRECTIONS ({len(alternatives)})\n")
+        f.write(f"{sub}\n\n")
+        for i, alt in enumerate(alternatives, 1):
+            orig = alt.get("original", "?")
+            repl = alt.get("replacement", "?")
+            f.write(f'{i}. "{orig}" -> "{repl}"\n')
+            if alt.get("reason"):
+                f.write(f'   Reason: {alt["reason"]}\n')
+            f.write("\n")
+
+        f.write(f"\n{bar}\n")
+        f.write("CLEAN VERSION\n")
+        f.write(f"{sub}\n\n")
+        if clean_segments:
+            for seg in clean_segments:
+                start = float(seg.get("start", 0.0))
+                end = float(seg.get("end", 0.0))
+                spk = seg.get("speaker", "Unknown")
+                text = seg.get("text", "")
+                f.write(f"[{start:.2f}s-{end:.2f}s] {spk}: {text}\n")
+        else:
+            f.write(
+                (interp.get("clean_version") or data.get("raw_transcript") or "")
+                + "\n"
+            )
+
+
+def _backfill_txt_from_json(json_path: Path) -> Path:
+    """Read ``*_output.json`` and write the sibling ``*_output.txt``."""
+    if not json_path.exists():
+        raise FileNotFoundError(json_path)
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    txt_path = json_path.with_suffix(".txt")
+    audio_path = data.get("audio_file") or json_path.stem.replace("_output", "")
+    write_output_txt(txt_path, audio_path, data)
+    return txt_path
+
+
 def main() -> None:
     if len(sys.argv) < 2:
-        print(f"Usage: python {sys.argv[0]} <audio_file>")
+        print(f"Usage:")
+        print(f"  python {sys.argv[0]} <audio_file>")
+        print(f"  python {sys.argv[0]} --write-txt <existing *_output.json>")
         sys.exit(1)
+
+    # Back-fill mode: reproduce the .txt for an existing JSON without
+    # touching Modal at all. Used after adding the writer to retrofit
+    # earlier cloud runs.
+    if sys.argv[1] == "--write-txt":
+        if len(sys.argv) < 3:
+            print(f"Usage: python {sys.argv[0]} --write-txt <json_path>")
+            sys.exit(1)
+        json_path = Path(sys.argv[2])
+        txt_path = _backfill_txt_from_json(json_path)
+        print(f"  Wrote: {txt_path}")
+        return
 
     audio_path = Path(sys.argv[1])
     if not audio_path.exists():
@@ -68,6 +179,11 @@ def main() -> None:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     print(f"  Wrote: {out_path}")
+
+    # Also write the human-readable .txt next to the JSON.
+    txt_path = out_path.with_suffix(".txt")
+    write_output_txt(txt_path, str(audio_path), result)
+    print(f"  Wrote: {txt_path}")
 
     # Quick sanity peek
     interp = result.get("interpretation", {}) or {}
