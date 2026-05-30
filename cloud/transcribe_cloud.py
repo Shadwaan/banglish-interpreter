@@ -69,6 +69,42 @@ def write_raw_txt(out_path: Path, data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Polished (Stage 3.5) .txt writer
+# ---------------------------------------------------------------------------
+
+def write_polished_txt(out_path: Path, audio_path: str, data: dict) -> None:
+    """
+    Write the human-readable polished transcript from
+    ``interpretation.polished_segments`` (Stage 3.5 smoothing output), in the
+    same ``[start_s-end_s] SPEAKER_XX: text`` form as the CLEAN VERSION
+    section of the B3 .txt.
+
+    Falls back to ``clean_segments`` if ``polished_segments`` is absent
+    (older runs / polish disabled).
+    """
+    interp = data.get("interpretation") or {}
+    segs = interp.get("polished_segments") or interp.get("clean_segments") or []
+
+    bar = "=" * 70
+    sub = "-" * 70
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("BANGLISH INTERPRETER — POLISHED (Stage 3.5)\n")
+        f.write(f"Audio: {audio_path}\n")
+        f.write(f"{bar}\n\n")
+        f.write("POLISHED TRANSCRIPT\n")
+        f.write(f"{sub}\n\n")
+        if segs:
+            for seg in segs:
+                start = float(seg.get("start", 0.0) or 0.0)
+                end = float(seg.get("end", 0.0) or 0.0)
+                spk = seg.get("speaker", "Unknown")
+                text = seg.get("text", "")
+                f.write(f"[{start:.2f}s-{end:.2f}s] {spk}: {text}\n")
+        else:
+            f.write((interp.get("clean_version") or "") + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Human-readable .txt formatter
 # ---------------------------------------------------------------------------
 
@@ -232,6 +268,11 @@ def main() -> None:
     raw_path = output_dir / f"{audio_path.stem}_raw.txt"
     write_raw_txt(raw_path, result)
     print(f"  Wrote: {raw_path}")
+
+    # Stage 3.5 polished, human-readable transcript (v2.1 polish feature).
+    polished_path = output_dir / f"{audio_path.stem}_polished_output.txt"
+    write_polished_txt(polished_path, str(audio_path), result)
+    print(f"  Wrote: {polished_path}")
 
     # Quick sanity peek
     interp = result.get("interpretation", {}) or {}

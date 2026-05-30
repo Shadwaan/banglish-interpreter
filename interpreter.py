@@ -520,6 +520,148 @@ class BanglishInterpreter:
 
 
 # ---------------------------------------------------------------------------
+# Stage 3.5 — polish (smoothing) pass
+# ---------------------------------------------------------------------------
+# A second Claude call AFTER the B3 corrections-only stage. It smooths
+# grammar, punctuation, sentence flow and removes hallucinated repetition,
+# WITHOUT inventing content. Non-destructive: any validation failure returns
+# the input segments unchanged so we never ship worse than B3.
+
+POLISH_MODEL = MODEL
+# Polish must echo the WHOLE transcript back, so it needs far more output
+# headroom than the diff-only B3 call. Bengali-heavy clips run ~300+ segments.
+POLISH_MAX_TOKENS = 32000
+
+POLISH_SYSTEM_PROMPT = """\
+You are an expert transcript editor for code-switched multilingual speech \
+(primarily Banglish — Bengali-Latin code-switched with English). You are \
+given a list of speaker-labeled, timestamped segments that have already \
+been cleaned for word-level corrections. Produce a polished, \
+human-readable version that smooths grammar, punctuation, sentence flow, \
+and removes repetitive filler — WITHOUT inventing content or changing \
+meaning.
+
+Rules:
+- Preserve every segment's start, end, and speaker exactly.
+- Preserve the actual content. Do NOT add information.
+- Preserve code-switched Banglish naturally — do not translate Bengali \
+words to English or vice versa.
+- DO smooth: punctuation, capitalization, sentence boundaries within a \
+segment, repetitive "let's say, let's say, let's say" -> "let's say".
+- DO remove transcription stutters and obvious repetition loops that \
+Stage 1 hallucinated.
+
+Output ONLY a JSON array of segments with the same schema as input:
+[{"start": float, "end": float, "speaker": str, "text": str}]
+No prose around the JSON; no markdown fences. The array MUST have exactly \
+the same number of elements as the input, in the same order.
+"""
+
+
+def _parse_polish_array(text: str) -> list[dict] | None:
+    """Extract a JSON array of segments from Claude's polish reply."""
+    cleaned = (text or "").strip()
+    # Strip optional ```json ... ``` fences.
+    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)```", cleaned, re.DOTALL)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Last-ditch: grab the first [ ... ] block.
+        arr_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+        if not arr_match:
+            return None
+        try:
+            parsed = json.loads(arr_match.group(0))
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, list):
+        return None
+    return parsed
+
+
+def polish_segments(
+    segments: list[dict],
+    anthropic_client: "anthropic.Anthropic",
+    model: str = POLISH_MODEL,
+) -> list[dict]:
+    """
+    Take B3-cleaned segments and return a polished, human-readable version
+    with the same schema and smoothed text.
+
+    Non-destructive contract: on ANY problem (API error, parse failure,
+    segment-count mismatch) this returns the INPUT segments unchanged, so a
+    polish failure can never ship something worse than the B3 output.
+
+    start/end/speaker are always taken from the INPUT (never trusted from
+    Claude), so they are preserved exactly by construction; only ``text`` is
+    adopted from the polished response.
+    """
+    if not segments:
+        return segments
+
+    payload = [
+        {
+            "start": s.get("start"),
+            "end": s.get("end"),
+            "speaker": s.get("speaker"),
+            "text": s.get("text", ""),
+        }
+        for s in segments
+    ]
+    user_msg = (
+        "Polish the following already-corrected segments. Return ONLY the "
+        "JSON array, same length and order.\n\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+    try:
+        # Stream the call: a non-streaming request with this large a
+        # max_tokens is rejected by the SDK ("Streaming is required for
+        # operations that may take longer than 10 minutes"). Streaming
+        # satisfies that requirement; we still collect the full final message.
+        with anthropic_client.messages.stream(
+            model=model,
+            max_tokens=POLISH_MAX_TOKENS,
+            system=POLISH_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+        ) as stream:
+            final = stream.get_final_message()
+        out_text = final.content[0].text
+    except Exception as e:
+        print(f"[polish] API call failed ({e}); returning B3 segments unchanged.")
+        return segments
+
+    polished = _parse_polish_array(out_text)
+    if polished is None:
+        print("[polish] could not parse JSON array; returning B3 segments unchanged.")
+        return segments
+    if len(polished) != len(segments):
+        print(
+            f"[polish] segment-count mismatch (got {len(polished)}, "
+            f"expected {len(segments)}); returning B3 segments unchanged."
+        )
+        return segments
+
+    out: list[dict] = []
+    for inp, pol in zip(segments, polished):
+        text = pol.get("text") if isinstance(pol, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            text = inp.get("text", "")
+        out.append(
+            {
+                "start": inp.get("start"),
+                "end": inp.get("end"),
+                "speaker": inp.get("speaker"),
+                "text": text.strip(),
+            }
+        )
+    print(f"[polish] polished {len(out)} segments.")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Quick CLI smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

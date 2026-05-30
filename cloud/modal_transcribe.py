@@ -56,6 +56,15 @@ image = (
         "lingua-language-detector",
         "english-words",
     )
+    # WhisperX 3.8.x alignment uses NLTK's punkt/punkt_tab for sentence
+    # splitting and downloads them from the network at runtime — flaky on
+    # Modal (seen as `urlopen error [Errno 104]` → alignment fails → pipeline
+    # degrades to coarse segments with zero low-confidence words). Bake them
+    # into the image so alignment never needs the network. NLTK_DATA is
+    # pointed at this baked path in the function body.
+    .run_commands(
+        "python -m nltk.downloader -d /usr/local/nltk_data punkt punkt_tab"
+    )
     .add_local_python_source(
         "config",
         "banglish_hints",
@@ -109,6 +118,9 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
     os.environ["HUGGINGFACE_HUB_CACHE"] = "/cache/huggingface/hub"
     os.environ["TORCH_HOME"] = "/cache/torch"
     os.environ["PYANNOTE_CACHE"] = "/cache/pyannote"
+    # NLTK data baked into the image (see Image.run_commands above) so
+    # WhisperX alignment's punkt/punkt_tab lookup never hits the network.
+    os.environ["NLTK_DATA"] = "/usr/local/nltk_data"
     for sub in (
         "/cache",
         "/cache/huggingface",
@@ -132,7 +144,7 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
     config.WHISPER_MODEL = "large-v3-turbo"
 
     from transcriber import transcribe_audio
-    from interpreter import BanglishInterpreter
+    from interpreter import BanglishInterpreter, polish_segments
 
     # 3. Stage 1 + 2 — Whisper + diarization.
     transcription = transcribe_audio(tmp_path)
@@ -143,6 +155,14 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
         raw_text=transcription.raw_text,
         low_confidence_words=transcription.low_confidence_words,
         diarized_segments=transcription.diarized_segments,
+    )
+
+    # 4b. Stage 3.5 — polish (smoothing) pass over the B3-cleaned segments.
+    #     Non-destructive: returns the B3 segments unchanged on any failure.
+    #     clean_segments is preserved as-is (the eval scores against it).
+    interpretation["polished_segments"] = polish_segments(
+        segments=interpretation.get("clean_segments") or [],
+        anthropic_client=interp._client,
     )
 
     # 5. Assemble the same output_data dict test_audio.py writes locally.
