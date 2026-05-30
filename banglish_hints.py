@@ -378,19 +378,17 @@ def build_whisper_prompt() -> str:
     # Take a generous slice of vocab (Whisper will truncate if needed).
     vocab_sample = ", ".join(ALL_VOCAB[:180])
 
-    pattern_sample = ". ".join(CODE_SWITCH_PATTERNS[:20])
-
+    # Fragment / keyword form — deliberately NOT complete imperative
+    # sentences. Whisper readily echoes whole sentences from initial_prompt
+    # into the transcript (we saw "Transcribe Bengali words in English" and
+    # "The speaker will freely mix Bengali and English" leak as segments).
+    # A short label + a comma-separated vocabulary list keeps the
+    # vocabulary-biasing benefit while giving the decoder no sentence to
+    # regurgitate. (See WHISPER_HALLUCINATION cleanup in transcriber.py for
+    # the belt-and-braces echo filter.)
     return (
-        "This is a conversation in Banglish — Bengali (Bangla) spoken and "
-        "written in English/Latin letters, frequently code-switching with "
-        "English words and phrases mid-sentence. "
-        "Bengali has aspirated consonants (kh, gh, chh, jh, th, dh, ph, bh) "
-        "and retroflex sounds that may resemble but are distinct from English "
-        "phonemes.\n\n"
-        f"Common Banglish words: {vocab_sample}.\n\n"
-        f"Example code-switching: {pattern_sample}.\n\n"
-        "The speaker will freely mix Bengali and English. Transcribe Bengali "
-        "words in their Roman/Latin transliteration, not in Bengali script."
+        "Banglish: Bengali in Latin/Roman script, code-switched with "
+        f"English. Vocabulary: {vocab_sample}."
     )
 
 

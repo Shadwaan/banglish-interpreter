@@ -267,6 +267,72 @@ def _remove_gibberish(text: str) -> str:
     return '. '.join(cleaned_parts)
 
 
+# ---------------------------------------------------------------------------
+# Holistic Whisper hallucination / prompt-echo filtering (step 12)
+# ---------------------------------------------------------------------------
+# Two well-documented, model-agnostic Whisper failure modes produce whole
+# junk SEGMENTS (not repeated phrases, so _remove_repeated_phrases misses
+# them):
+#   (A) YouTube-tail hallucinations on silent / low-content audio
+#   (B) initial_prompt echo — the decoder regurgitating the prompt as text
+# We drop a segment only on a WHOLE-segment (normalized) match, never a
+# substring, so real sentences that merely contain "thanks" are untouched.
+
+WHISPER_HALLUCINATION_PHRASES = {
+    "thank you for watching",
+    "thanks for watching",
+    "thank you so much for watching",
+    "thank you very much for watching",
+    "please subscribe",
+    "please subscribe to the channel",
+    "don't forget to like and subscribe",
+    "like and subscribe",
+    "subscribe to the channel",
+    "thanks for watching and see you next time",
+}
+
+# Known initial_prompt echoes — the current fragment prompt plus the
+# historical full-sentence Banglish prompts that leaked before step 12.
+_KNOWN_PROMPT_ECHOES = {
+    "the speaker will freely mix bengali and english",
+    "the speaker will freely mix bengali words in english",
+    "transcribe bengali words in their roman/latin transliteration, not in bengali script",
+    "transcribe bengali words in english",
+    "transcribe bengali words in bengali script",
+    "banglish: bengali in latin/roman script, code-switched with english",
+    "this is a conversation in banglish",
+}
+
+
+def _normalize_for_match(text: str) -> str:
+    """Lowercase, strip surrounding whitespace and trailing punctuation."""
+    return (text or "").strip().lower().rstrip(".!?,;:").strip()
+
+
+def _is_hallucination_phrase(text: str) -> bool:
+    return _normalize_for_match(text) in WHISPER_HALLUCINATION_PHRASES
+
+
+def _is_prompt_echo(text: str) -> bool:
+    """
+    True if the whole segment matches an initial_prompt echo — either a known
+    historical/current echo string, or a complete short sentence within the
+    current BANGLISH_PROMPT. The huge comma-joined vocabulary sentence is
+    skipped (len guard) so we never partial-match real content.
+    """
+    norm = _normalize_for_match(text)
+    if not norm:
+        return False
+    if norm in _KNOWN_PROMPT_ECHOES:
+        return True
+    prompt = BANGLISH_PROMPT or ""
+    for sent in re.split(r"[.\n]", prompt):
+        s = _normalize_for_match(sent)
+        if s and len(s) < 120 and s == norm:
+            return True
+    return False
+
+
 def _clean_hallucinations(text: str) -> str:
     """Full hallucination cleanup pipeline."""
     text = _remove_repeated_phrases(text)
@@ -283,6 +349,11 @@ def _clean_segment_text(text: str) -> str:
     text = _remove_repeated_phrases(text)
     text = _remove_gibberish(text)
     text = re.sub(r'\s{2,}', ' ', text).strip()
+    # Drop whole-segment YouTube-tail hallucinations and initial_prompt
+    # echoes — return "" so the caller's `if seg_text:` skips the segment.
+    if _is_hallucination_phrase(text) or _is_prompt_echo(text):
+        print(f"[transcriber] dropped hallucination/prompt-echo segment: {text[:70]!r}")
+        return ""
     return text
 
 
