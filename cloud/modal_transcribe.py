@@ -136,12 +136,15 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
     with open(tmp_path, "wb") as f:
         f.write(audio_bytes)
 
-    # 2. Swap the Whisper model BEFORE transcriber.py reads the constant.
-    #    config.py hard-codes WHISPER_MODEL = "small"; we want large-v3-turbo
-    #    on cloud GPU. Import config first, mutate the constant, THEN import
-    #    transcriber so _get_model() picks up the override.
+    # 2. Whisper model size. v2 used large-v3-turbo, but its larger
+    #    multilingual vocabulary is what introduced the Hindi-drift regression
+    #    (it substitutes romanized Hindi/Urdu for Bengali audio). Step 10
+    #    reverts to "small" — the model v1.5 used — to test whether the model
+    #    upgrade (not the cloud move) was the regression source. config.py
+    #    already hard-codes "small", so we simply DON'T override it here; the
+    #    cloud GPU still gives the v2 speed win on the smaller model.
     import config
-    config.WHISPER_MODEL = "large-v3-turbo"
+    config.WHISPER_MODEL = "small"
 
     from transcriber import transcribe_audio
     from interpreter import BanglishInterpreter, polish_segments
