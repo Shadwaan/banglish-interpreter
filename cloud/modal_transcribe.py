@@ -144,7 +144,7 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
     #    already hard-codes "small", so we simply DON'T override it here; the
     #    cloud GPU still gives the v2 speed win on the smaller model.
     import config
-    config.WHISPER_MODEL = "small"
+    config.WHISPER_MODEL = "medium"
 
     from transcriber import transcribe_audio
     from interpreter import BanglishInterpreter, polish_segments
