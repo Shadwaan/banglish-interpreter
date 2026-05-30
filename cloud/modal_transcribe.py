@@ -50,6 +50,11 @@ image = (
         "scipy",
         "python-dotenv",
         "torch",
+        # Stage 1b two-pass: deterministic language classifier to flag
+        # non-English/non-Banglish segments for bn re-transcription, plus a
+        # ready-made English vocabulary set for the word-density signal.
+        "lingua-language-detector",
+        "english-words",
     )
     .add_local_python_source(
         "config",

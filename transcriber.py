@@ -20,6 +20,192 @@ from banglish_hints import WHISPER_PROMPT as BANGLISH_PROMPT
 # Confidence threshold — words below this are flagged as uncertain.
 LOW_CONFIDENCE_THRESHOLD = 0.65
 
+
+# ---------------------------------------------------------------------------
+# Stage 1b — heuristic two-pass language flagging (step 7)
+# ---------------------------------------------------------------------------
+# After the English first pass, a deterministic language classifier flags
+# segments that look non-English / non-Banglish (i.e. Indic-family drift),
+# and those segments are re-transcribed in bn mode and stitched back in.
+#
+# The lingua + english_words imports are deferred behind a lazy builder so
+# that importing this module on a machine without those deps (the local
+# venv) does not hard-fail; on Modal the image installs both.
+
+_LANG_DETECTOR = None
+_ENGLISH_VOCAB = None
+_INDIC_DRIFT_LANGUAGES = None
+
+
+def _get_lang_detector():
+    """Build (or return cached) the lingua language detector + helpers."""
+    global _LANG_DETECTOR, _ENGLISH_VOCAB, _INDIC_DRIFT_LANGUAGES
+    if _LANG_DETECTOR is None:
+        from lingua import Language, LanguageDetectorBuilder
+        from english_words import get_english_words_set
+
+        # English, Bengali, plus the Indic neighbours we want to flag.
+        # NOTE: lingua (2.1.x) does not include Nepali in its supported
+        # language set, so it is omitted; Hindi/Urdu/Marathi/Punjabi cover
+        # the romanized-Indic drift we actually see on Bengali audio.
+        _LANG_DETECTOR = (
+            LanguageDetectorBuilder
+            .from_languages(
+                Language.ENGLISH,
+                Language.BENGALI,
+                Language.HINDI,
+                Language.URDU,
+                Language.MARATHI,
+                Language.PUNJABI,
+            )
+            .build()
+        )
+        _ENGLISH_VOCAB = get_english_words_set(["web2"], lower=True, alpha=True)
+        _INDIC_DRIFT_LANGUAGES = {
+            Language.HINDI, Language.URDU, Language.MARATHI,
+            Language.PUNJABI,
+        }
+    return _LANG_DETECTOR, _ENGLISH_VOCAB, _INDIC_DRIFT_LANGUAGES
+
+
+def _english_word_density(text: str) -> float:
+    """Fraction of tokens (lowercased, alpha-only) recognised as English."""
+    _, vocab, _ = _get_lang_detector()
+    tokens = re.findall(r"[A-Za-z]+", text.lower())
+    if not tokens:
+        return 0.0
+    return sum(1 for t in tokens if t in vocab) / len(tokens)
+
+
+def _non_latin_alpha_fraction(text: str) -> float:
+    """
+    Fraction of alphabetic characters that are NOT basic Latin. Used to
+    detect when a bn-mode re-transcription came back as Bengali *script*
+    (which this romanized pipeline cannot use — see
+    ``_retranscribe_segment_in_bn``).
+    """
+    alpha = [ch for ch in text if ch.isalpha()]
+    if not alpha:
+        return 0.0
+    non_latin = sum(1 for ch in alpha if ord(ch) > 0x024F)  # beyond Latin Ext-B
+    return non_latin / len(alpha)
+
+
+def _should_flag_for_retranscribe(text: str) -> bool:
+    """
+    Aggressive flagger: returns True if this segment should be
+    re-transcribed in ``bn`` mode. Per the build-log decision, we err
+    toward flagging on ambiguous cases.
+
+    Rules:
+    - Empty or very short (<3 tokens) text: don't flag (classifier is
+      unreliable, and the segment is too small for the cost to matter).
+    - Any Indic-family language detected (Hindi/Urdu/Marathi/Nepali/
+      Punjabi): flag.
+    - Bengali detected (lingua sometimes classifies clean Banglish as
+      Bengali): don't flag, it's already Bengali-shaped.
+    - English detected with high confidence (>=0.7) AND English-word
+      density >= 0.5: don't flag, it's clean English or English-heavy
+      Banglish.
+    - All other cases (English-but-low-confidence, low English density,
+      classifier returning None): FLAG. Aggressive default.
+    """
+    detector, _, indic = _get_lang_detector()
+    from lingua import Language
+
+    text = (text or "").strip()
+    if not text:
+        return False
+    tokens = re.findall(r"\S+", text)
+    if len(tokens) < 3:
+        return False
+
+    detected = detector.detect_language_of(text)
+
+    if detected in indic:
+        return True
+    if detected == Language.BENGALI:
+        return False
+    if detected == Language.ENGLISH:
+        eng_conf = detector.compute_language_confidence(text, Language.ENGLISH)
+        eng_density = _english_word_density(text)
+        if eng_conf >= 0.7 and eng_density >= 0.5:
+            return False
+        return True  # aggressive: ambiguous English → flag
+    # detected is None or some unexpected language
+    return True
+
+
+def _extract_audio_slice(audio, start_sec: float, end_sec: float,
+                         sample_rate: int = 16000):
+    """Numpy-slice the loaded audio array by time range."""
+    start_idx = max(0, int(start_sec * sample_rate))
+    end_idx = min(len(audio), int(end_sec * sample_rate))
+    return audio[start_idx:end_idx]
+
+
+def _retranscribe_segment_in_bn(model, audio_slice) -> str:
+    """
+    Re-transcribe a single audio slice with ``language='bn'``. Returns the
+    concatenated text of whatever segments Whisper produces for the slice.
+
+    IMPORTANT: forced bn mode tends to emit Bengali *script*, which this
+    romanized pipeline's downstream gibberish-stripper would delete. We
+    therefore REJECT (return "") any output that is predominantly non-Latin,
+    so the caller keeps the original en-pass text instead of losing the
+    segment entirely. The non-Latin fraction is logged either way so the
+    experiment can see exactly what bn mode produced.
+    """
+    if len(audio_slice) < 1600:  # less than 0.1s of audio at 16kHz
+        return ""
+    try:
+        # Clear the cached tokenizer before each differently-languaged call.
+        # WhisperX's transcribe() does `task = task or self.tokenizer.task`
+        # when a tokenizer already exists; faster-whisper's `.task` returns
+        # the task TOKEN-ID (e.g. 50360), not the string "transcribe", which
+        # then raises "'50360' is not a valid task". Resetting to None forces
+        # the clean `tokenizer is None` path (task defaults to "transcribe").
+        # Same fix Path B used (see BUILD-LOG 2026-05-30 Path B entry).
+        try:
+            model.tokenizer = None
+        except Exception:
+            pass
+        result = model.transcribe(audio_slice, language="bn", batch_size=16)
+        segs = result.get("segments", [])
+        text = " ".join(s.get("text", "").strip() for s in segs).strip()
+        if not text:
+            return ""
+        nl = _non_latin_alpha_fraction(text)
+        if nl > 0.5:
+            print(
+                f"[transcriber] bn output rejected (non-Latin frac={nl:.2f}, "
+                f"Bengali script): {text[:60]!r}"
+            )
+            return ""
+        if nl > 0.0:
+            print(f"[transcriber] bn output kept (non-Latin frac={nl:.2f})")
+        return text
+    except Exception as e:
+        print(f"[transcriber] bn re-transcribe failed for slice: {e}")
+        return ""
+
+
+# Lightweight unit check for the flagger logic. Run on Modal (where the
+# deps exist) with:  python -c "import transcriber; transcriber._selftest_flagger()"
+def _selftest_flagger() -> None:
+    tests = [
+        ("I think we can start with the MVP next week", False),   # clean English
+        ("ami today office jabo, traffic onek bad ache", False),  # clean Banglish
+        ("pa meela hai, wadah madat cha, ai hai", True),          # Hindi-drift
+        ("hi", False),                                            # too short
+    ]
+    for text, expected in tests:
+        got = _should_flag_for_retranscribe(text)
+        density = _english_word_density(text)
+        status = "OK" if got == expected else "FAIL"
+        print(f'{status}: "{text[:40]}" -> flag={got} '
+              f'(expected={expected}, density={density:.2f})')
+
 # ---------------------------------------------------------------------------
 # Hallucination detection
 # ---------------------------------------------------------------------------
@@ -294,10 +480,52 @@ def transcribe_audio(
     # ── Step 1: Transcribe ────────────────────────────────────────────
     print("[transcriber] Transcribing audio ...")
     audio = whisperx.load_audio(audio_path)
+    # Reset any tokenizer left over from a previous clip's bn re-transcribe
+    # pass (the module-level model is cached across invocations). A leftover
+    # bn tokenizer would force a language-change rebuild here and trip the
+    # faster-whisper task-token-id bug; starting from None rebuilds en cleanly.
+    try:
+        model.tokenizer = None
+    except Exception:
+        pass
     result = model.transcribe(
         audio,
         language=lang,
         batch_size=16,
+    )
+
+    # ── Step 1b: Heuristic two-pass for non-English drift ─────────────
+    # Flag segments that look non-English / non-Banglish (Indic-family
+    # drift) with a deterministic classifier, then re-transcribe just
+    # those slices in bn mode and stitch the text back in. Runs on the
+    # raw first-pass segments, before hallucination cleanup / alignment /
+    # diarization (all of which then operate on the stitched text).
+    flagged_count = 0
+    retranscribed_count = 0
+    rejected_script_count = 0
+    first_pass_segments = result.get("segments", [])
+    for seg in first_pass_segments:
+        if _should_flag_for_retranscribe(seg.get("text", "")):
+            flagged_count += 1
+            new_text = _retranscribe_segment_in_bn(
+                model,
+                _extract_audio_slice(
+                    audio, seg.get("start", 0.0), seg.get("end", 0.0)
+                ),
+            )
+            if new_text and new_text != seg.get("text", "").strip():
+                seg["text"] = new_text
+                retranscribed_count += 1
+            elif not new_text:
+                # _retranscribe_segment_in_bn returns "" both on failure and
+                # when it rejected Bengali-script output; the per-slice log
+                # distinguishes them. Track the rejection bucket loosely.
+                rejected_script_count += 1
+    print(
+        f"[transcriber] two-pass: flagged {flagged_count} of "
+        f"{len(first_pass_segments)} segments; {retranscribed_count} replaced "
+        f"with bn-mode output; {rejected_script_count} flagged-but-unreplaced "
+        f"(bn empty/failed/script-rejected)"
     )
 
     raw_text: str = " ".join(
