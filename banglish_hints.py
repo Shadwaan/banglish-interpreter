@@ -293,6 +293,52 @@ WHISPER_MISHEARINGS: dict[str, list[str]] = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3b. HINDI-DRIFT EXAMPLES  (secondary pattern)
+#     Hindi-shaped outputs Whisper produces on Bengali audio when forced into
+#     `en` mode. Used as secondary few-shot examples to the primary
+#     English→Bengali map above.
+#
+#     This is a DIFFERENT failure mode from §3: there, an English-biased
+#     decoder maps a Bengali phoneme to the nearest *English* word. Here, a
+#     larger multilingual decoder (e.g. large-v3-turbo) reaches for the nearest
+#     *Indic* token in its vocabulary and lands on Hindi/Urdu-shaped words
+#     instead of Bengali — observed concretely on the Mehdi update clip. These
+#     are illustrative examples, not an exhaustive map; the correction
+#     PRINCIPLE (Hindi/Urdu-shaped vocab → Bengali equivalent) generalises to
+#     similar patterns Claude detects.
+#         "what Whisper drifts to (Hindi-shaped)" → ["likely Bengali", ...]
+# ═══════════════════════════════════════════════════════════════════════════
+
+HINDI_DRIFT_EXAMPLES: dict[str, list[str]] = {
+    "pa mila hai":   ["peyechi", "peyeche"],
+    "pa meela hai":  ["peyechi", "peyeche"],
+    "mila hai":      ["peyechi", "peyeche"],
+    "ai hai":        ["ache"],
+    "hai toh":       ["ache"],
+    "hai na":        ["ache", "na"],
+    "tase hai":      ["thik ache"],
+    "kuhi tase hai": ["thik ache"],
+    "wadah madat":   ["valo madat", "shahajjo"],
+    "madat":         ["shahajjo"],
+    "kya hai":       ["ki ache", "ki"],
+    "kya":           ["ki"],
+    "kaise":         ["kemne", "kemon"],
+    "kaise ho":      ["kemon acho"],
+    "nahi hai":      ["nai", "noy"],
+    "nahi":          ["na", "nai"],
+    "kya kar":       ["ki kor", "ki korbe"],
+    "kar raha":      ["korche", "korchi"],
+    "bihata":        ["tase"],   # -bihata/-bihara as Hindi-ish endings
+    "bihara":        ["tase"],
+    "mein hu":       ["ami achi"],
+    "kahan hai":     ["kothay ache"],
+    "kyun":          ["keno"],
+    "abhi":          ["ekhon", "akhon"],
+    "thik hai":      ["thik ache"],
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 4.  BUILT STRINGS — ready to drop into Whisper / Claude prompts
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -369,6 +415,19 @@ def build_claude_reference() -> str:
     )
     for eng, bangla_opts in WHISPER_MISHEARINGS.items():
         lines.append(f"  • \"{eng}\" → {', '.join(bangla_opts)}")
+
+    lines.append("\n## Hindi-drift examples (secondary pattern)\n")
+    lines.append(
+        "Beyond English-biased mishearings, ASR sometimes substitutes "
+        "Hindi/Urdu-shaped vocabulary for Bengali audio — especially under "
+        "larger multilingual decoders, which reach for the nearest Indic "
+        "token rather than the correct Bengali one. These are examples of "
+        "that drift; apply the SAME correction principle (Hindi/Urdu-shaped "
+        "vocab → Bengali equivalent) to similar patterns you detect, not just "
+        "these exact strings:\n"
+    )
+    for hindi, bangla_opts in HINDI_DRIFT_EXAMPLES.items():
+        lines.append(f"  • \"{hindi}\" → {', '.join(bangla_opts)}")
 
     lines.append("\n## Common Banglish code-switching patterns\n")
     lines.append(

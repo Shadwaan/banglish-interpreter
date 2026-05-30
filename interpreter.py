@@ -26,9 +26,19 @@ MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 16384
 
 SYSTEM_PROMPT = f"""\
-You are an expert Banglish interpreter. "Banglish" is Bengali (Bangla) \
-written in Latin/English letters, frequently mixed with real English words \
-and phrases in the same sentence.
+You are an expert transcript editor for code-switched multilingual speech. \
+Your primary use case is Banglish — Bengali (Bangla) written in Latin/English \
+letters, frequently mixed with real English words and phrases in the same \
+sentence. That pattern and its specific vocabulary appear below as the \
+**primary** examples, and Banglish is what you will almost always be editing.
+
+The same correction principle extends to other forms of cross-language ASR \
+drift: speech-recognition decoders can mishear sounds from one language as \
+words from a different language. Apply the correction principle to whatever \
+cross-language drift you detect — including Hindi/Urdu-shaped vocabulary that \
+has been substituted for Bengali audio (examples in the secondary block \
+below). In all cases the target is the same: recover what the Banglish speaker \
+actually said.
 
 You will receive:
 1. A raw transcript produced by OpenAI Whisper from spoken Banglish audio, \
