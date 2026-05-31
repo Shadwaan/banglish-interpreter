@@ -8,3 +8,7 @@ pyaudio
 python-dotenv
 flask
 pyannote.audio
+
+# Cloud invoker (cloud/transcribe_cloud.py) — calls the deployed Modal GPU app.
+# Not needed for the legacy local runner, only for the cloud path.
+modal
