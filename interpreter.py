@@ -355,6 +355,153 @@ def _reconstruct_clean(
 
 
 # ---------------------------------------------------------------------------
+# LLM provider abstraction
+# ---------------------------------------------------------------------------
+# A thin interface so Stage 3 / Stage 3.5 can switch between Claude and
+# Gemini via config.LLM_PROVIDER, WITHOUT changing any existing Claude
+# behavior. The default provider is "anthropic"; with LLM_PROVIDER unset or
+# "anthropic" the AnthropicClient reproduces the exact original calls
+# (model, max_tokens, system, messages) and return values, so the pipeline
+# runs identically to before. Gemini is purely additive and opt-in.
+#
+# Both providers return PLAIN TEXT (the model's raw reply). The JSON-correction
+# output therefore comes back as text and the existing `_parse_response` /
+# `_parse_polish_array` parsers keep working unchanged.
+
+
+class LLMClient:
+    """Minimal provider-agnostic interface used by the interpreter."""
+
+    def generate(self, system: str, messages: list, max_tokens: int) -> str:
+        """Single-shot completion. Returns the full reply text."""
+        raise NotImplementedError
+
+    def stream(self, system: str, messages: list, max_tokens: int) -> str:
+        """Streamed completion. Returns the full streamed text (collected)."""
+        raise NotImplementedError
+
+
+class AnthropicClient(LLMClient):
+    """
+    Wraps the EXACT original Anthropic logic.
+
+    ``generate`` → ``messages.create(...)`` returning ``message.content[0].text``.
+    ``stream``   → ``messages.stream(...)`` collected via
+    ``get_final_message().content[0].text`` (the path the polish stage has
+    always used — streaming is required for the large polish max_tokens).
+
+    Model defaults to the module ``MODEL`` constant, exactly as before
+    (Stage 3 used ``MODEL`` and Stage 3.5 used ``POLISH_MODEL``, which is
+    defined as ``MODEL``), so behavior is unchanged.
+    """
+
+    def __init__(self, api_key: str | None = None, model: str = MODEL):
+        self._client = anthropic.Anthropic(
+            api_key=api_key or config.ANTHROPIC_API_KEY,
+        )
+        self._model = model
+
+    def generate(self, system: str, messages: list, max_tokens: int) -> str:
+        message = self._client.messages.create(
+            model=self._model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+        )
+        return message.content[0].text
+
+    def stream(self, system: str, messages: list, max_tokens: int) -> str:
+        with self._client.messages.stream(
+            model=self._model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+        ) as stream:
+            final = stream.get_final_message()
+        return final.content[0].text
+
+
+class GeminiClient(LLMClient):
+    """
+    Gemini implementation via the ``google-genai`` SDK, producing the same
+    string outputs as :class:`AnthropicClient`.
+
+    The Anthropic-style ``(system, messages)`` inputs are mapped onto Gemini's
+    format: the system prompt becomes ``system_instruction`` and each message
+    becomes a ``Content`` whose role is ``user`` or ``model`` (Anthropic's
+    ``assistant`` → Gemini's ``model``). The reply is returned as plain text
+    so the existing JSON parsers keep working unchanged.
+
+    The ``google.genai`` import is deferred to construction time so that
+    importing this module — and running the default Anthropic path — never
+    requires ``google-genai`` to be installed.
+    """
+
+    def __init__(self, api_key: str | None = None, model: str | None = None):
+        from google import genai  # deferred: only needed for the Gemini path
+
+        self._genai = genai
+        self._client = genai.Client(api_key=api_key or config.GEMINI_API_KEY)
+        self._model = model or config.GEMINI_MODEL
+
+    def _to_contents(self, messages: list):
+        """Map Anthropic-style messages to Gemini ``Content`` objects."""
+        from google.genai import types
+
+        contents = []
+        for m in messages:
+            role = "model" if m.get("role") == "assistant" else "user"
+            contents.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part(text=str(m.get("content", "")))],
+                )
+            )
+        return contents
+
+    def _gen_config(self, system: str, max_tokens: int):
+        from google.genai import types
+
+        return types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+        )
+
+    def generate(self, system: str, messages: list, max_tokens: int) -> str:
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=self._to_contents(messages),
+            config=self._gen_config(system, max_tokens),
+        )
+        return response.text or ""
+
+    def stream(self, system: str, messages: list, max_tokens: int) -> str:
+        chunks: list[str] = []
+        for chunk in self._client.models.generate_content_stream(
+            model=self._model,
+            contents=self._to_contents(messages),
+            config=self._gen_config(system, max_tokens),
+        ):
+            if getattr(chunk, "text", None):
+                chunks.append(chunk.text)
+        return "".join(chunks)
+
+
+def get_llm_client(api_key: str | None = None) -> LLMClient:
+    """
+    Return the LLM client selected by ``config.LLM_PROVIDER``.
+
+    Defaults to :class:`AnthropicClient` — with ``LLM_PROVIDER`` unset or
+    ``"anthropic"`` the returned client behaves exactly as the original code.
+    ``"gemini"`` returns :class:`GeminiClient`.
+    """
+    provider = (getattr(config, "LLM_PROVIDER", "anthropic") or "anthropic").lower()
+    if provider == "gemini":
+        return GeminiClient(api_key=api_key)
+    return AnthropicClient(api_key=api_key)
+
+
+# ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
 
@@ -365,9 +512,10 @@ class BanglishInterpreter:
     """
 
     def __init__(self, api_key: str | None = None):
-        self._client = anthropic.Anthropic(
-            api_key=api_key or config.ANTHROPIC_API_KEY,
-        )
+        # Provider-agnostic client (defaults to Anthropic / Claude). With
+        # config.LLM_PROVIDER unset or "anthropic" this is an AnthropicClient
+        # that reproduces the original behavior exactly.
+        self._llm: LLMClient = get_llm_client(api_key)
         self.conversation_history: list[dict[str, str]] = []
         self._last_result: dict[str, Any] | None = None
 
@@ -497,14 +645,16 @@ class BanglishInterpreter:
     # ----- internals -----
 
     def _send(self) -> str:
-        """Call the Anthropic API with the current conversation history."""
-        message = self._client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
+        """Call the configured LLM with the current conversation history.
+
+        Behavior on the default Anthropic path is identical to the original
+        ``messages.create(model=MODEL, max_tokens=MAX_TOKENS, ...)`` call.
+        """
+        return self._llm.generate(
             system=SYSTEM_PROMPT,
             messages=self.conversation_history,
+            max_tokens=MAX_TOKENS,
         )
-        return message.content[0].text
 
     # ----- convenience -----
 
@@ -583,7 +733,7 @@ def _parse_polish_array(text: str) -> list[dict] | None:
 
 def polish_segments(
     segments: list[dict],
-    anthropic_client: "anthropic.Anthropic",
+    llm_client: "LLMClient | None" = None,
     model: str = POLISH_MODEL,
 ) -> list[dict]:
     """
@@ -595,11 +745,20 @@ def polish_segments(
     polish failure can never ship something worse than the B3 output.
 
     start/end/speaker are always taken from the INPUT (never trusted from
-    Claude), so they are preserved exactly by construction; only ``text`` is
+    the LLM), so they are preserved exactly by construction; only ``text`` is
     adopted from the polished response.
+
+    ``llm_client`` is a provider-agnostic :class:`LLMClient`. When omitted it
+    defaults to the configured provider via :func:`get_llm_client` (Anthropic
+    unless ``LLM_PROVIDER == "gemini"``). The Anthropic path streams the call
+    exactly as before — a non-streaming request with this large a max_tokens
+    is rejected by the SDK.
     """
     if not segments:
         return segments
+
+    if llm_client is None:
+        llm_client = get_llm_client()
 
     payload = [
         {
@@ -620,15 +779,12 @@ def polish_segments(
         # Stream the call: a non-streaming request with this large a
         # max_tokens is rejected by the SDK ("Streaming is required for
         # operations that may take longer than 10 minutes"). Streaming
-        # satisfies that requirement; we still collect the full final message.
-        with anthropic_client.messages.stream(
-            model=model,
-            max_tokens=POLISH_MAX_TOKENS,
+        # satisfies that requirement; we still collect the full final text.
+        out_text = llm_client.stream(
             system=POLISH_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
-        ) as stream:
-            final = stream.get_final_message()
-        out_text = final.content[0].text
+            max_tokens=POLISH_MAX_TOKENS,
+        )
     except Exception as e:
         print(f"[polish] API call failed ({e}); returning B3 segments unchanged.")
         return segments
