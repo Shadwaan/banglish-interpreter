@@ -17,6 +17,19 @@ if sys.platform == "win32" and os.path.isdir(_FFMPEG_WINGET):
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
+# ---------------------------------------------------------------------------
+# LLM provider selection (Stage 3 / Stage 3.5 cleanup calls).
+#
+# Default is "anthropic" — with LLM_PROVIDER unset or set to "anthropic" the
+# pipeline behaves EXACTLY as it always has (Claude). "gemini" is purely
+# additive and opt-in.
+# ---------------------------------------------------------------------------
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")  # "anthropic" | "gemini"
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Current Gemini model used when LLM_PROVIDER == "gemini".
+GEMINI_MODEL = "gemini-2.5-pro"
+
 # Whisper settings
 WHISPER_MODEL = "small"
 # Use "en" — the audio is English-dominant Banglish. Using "bn" causes
