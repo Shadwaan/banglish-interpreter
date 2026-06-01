@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import anthropic
@@ -369,6 +370,107 @@ def _reconstruct_clean(
 # `_parse_polish_array` parsers keep working unchanged.
 
 
+# ---------------------------------------------------------------------------
+# Bounded transient-retry (shared by both providers)
+# ---------------------------------------------------------------------------
+# Retries ONLY transient failures (rate limits, 5xx, overloaded, connection
+# errors) with exponential backoff, then gives up and re-raises. This does NOT
+# alter the success path: on the first successful call the result is returned
+# immediately and unchanged. Non-transient errors (4xx other than 429, parse
+# bugs, etc.) propagate immediately without retry.
+
+_RETRY_MAX_TRIES = 5
+_RETRY_BACKOFFS = (2, 4, 8, 16)  # seconds before tries 2..5
+
+# Transient HTTP status codes: 429 (rate limit), 500/502/503 (server), 529
+# (Anthropic "overloaded").
+_TRANSIENT_STATUS = {429, 500, 502, 503, 529}
+
+# Substrings that mark a transient condition when status codes aren't exposed
+# (e.g. Gemini's 503 surfaces as text; connection resets vary by platform).
+_TRANSIENT_SUBSTRINGS = (
+    "overloaded",
+    "unavailable",
+    "rate limit",
+    "ratelimit",
+    "resource_exhausted",
+    "try again",
+    "timeout",
+    "timed out",
+    "connection",
+    "temporarily",
+)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """True if `exc` looks like a transient API failure worth retrying."""
+    # 1. Anthropic SDK exception types (present since the SDK is always imported).
+    transient_types = []
+    for name in ("RateLimitError", "InternalServerError", "APIConnectionError",
+                 "APITimeoutError"):
+        t = getattr(anthropic, name, None)
+        if isinstance(t, type):
+            transient_types.append(t)
+    if transient_types and isinstance(exc, tuple(transient_types)):
+        return True
+
+    # 2. google-genai exception types (only importable when that path is used).
+    try:
+        from google.genai import errors as _genai_errors  # type: ignore
+
+        server = getattr(_genai_errors, "ServerError", None)
+        if isinstance(server, type) and isinstance(exc, server):
+            return True
+        client_err = getattr(_genai_errors, "ClientError", None)
+        # ClientError covers 4xx; only 429 among those is transient.
+        if isinstance(client_err, type) and isinstance(exc, client_err):
+            code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            if code == 429:
+                return True
+    except Exception:
+        pass
+
+    # 3. Generic: an exposed status/code attribute in the transient set.
+    code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if isinstance(code, int) and code in _TRANSIENT_STATUS:
+        return True
+
+    # 4. Last resort: scan the message text for a transient signature.
+    msg = str(exc).lower()
+    if any(code_str in msg for code_str in ("429", "500", "502", "503", "529")):
+        return True
+    return any(sub in msg for sub in _TRANSIENT_SUBSTRINGS)
+
+
+def _retry_transient(call, *, label: str = "llm"):
+    """
+    Invoke ``call()`` with bounded exponential backoff on transient errors.
+
+    Up to ``_RETRY_MAX_TRIES`` attempts; sleeps ``_RETRY_BACKOFFS`` between
+    them. Non-transient errors raise immediately. After the final attempt the
+    last transient error is re-raised. The success path is untouched — a
+    first-try success returns straight through.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _RETRY_MAX_TRIES + 1):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001
+            if not _is_transient_error(exc):
+                raise
+            last_exc = exc
+            if attempt >= _RETRY_MAX_TRIES:
+                break
+            delay = _RETRY_BACKOFFS[min(attempt - 1, len(_RETRY_BACKOFFS) - 1)]
+            print(
+                f"[{label}] transient API error (attempt {attempt}/"
+                f"{_RETRY_MAX_TRIES}): {str(exc)[:80]}; retrying in {delay}s"
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
+
+
 class LLMClient:
     """Minimal provider-agnostic interface used by the interpreter."""
 
@@ -396,29 +498,39 @@ class AnthropicClient(LLMClient):
     """
 
     def __init__(self, api_key: str | None = None, model: str = MODEL):
+        # max_retries=0: the Anthropic SDK retries some errors by default; we
+        # disable that so our _retry_transient wrapper is the single, bounded
+        # retry layer (avoids stacked/double retries). Same client otherwise.
         self._client = anthropic.Anthropic(
             api_key=api_key or config.ANTHROPIC_API_KEY,
+            max_retries=0,
         )
         self._model = model
 
     def generate(self, system: str, messages: list, max_tokens: int) -> str:
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-        )
-        return message.content[0].text
+        def _call():
+            message = self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+            )
+            return message.content[0].text
+
+        return _retry_transient(_call, label="anthropic.generate")
 
     def stream(self, system: str, messages: list, max_tokens: int) -> str:
-        with self._client.messages.stream(
-            model=self._model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-        ) as stream:
-            final = stream.get_final_message()
-        return final.content[0].text
+        def _call():
+            with self._client.messages.stream(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+            ) as stream:
+                final = stream.get_final_message()
+            return final.content[0].text
+
+        return _retry_transient(_call, label="anthropic.stream")
 
 
 class GeminiClient(LLMClient):
@@ -468,23 +580,29 @@ class GeminiClient(LLMClient):
         )
 
     def generate(self, system: str, messages: list, max_tokens: int) -> str:
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=self._to_contents(messages),
-            config=self._gen_config(system, max_tokens),
-        )
-        return response.text or ""
+        def _call():
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=self._to_contents(messages),
+                config=self._gen_config(system, max_tokens),
+            )
+            return response.text or ""
+
+        return _retry_transient(_call, label="gemini.generate")
 
     def stream(self, system: str, messages: list, max_tokens: int) -> str:
-        chunks: list[str] = []
-        for chunk in self._client.models.generate_content_stream(
-            model=self._model,
-            contents=self._to_contents(messages),
-            config=self._gen_config(system, max_tokens),
-        ):
-            if getattr(chunk, "text", None):
-                chunks.append(chunk.text)
-        return "".join(chunks)
+        def _call():
+            chunks: list[str] = []
+            for chunk in self._client.models.generate_content_stream(
+                model=self._model,
+                contents=self._to_contents(messages),
+                config=self._gen_config(system, max_tokens),
+            ):
+                if getattr(chunk, "text", None):
+                    chunks.append(chunk.text)
+            return "".join(chunks)
+
+        return _retry_transient(_call, label="gemini.stream")
 
 
 def get_llm_client(api_key: str | None = None) -> LLMClient:
