@@ -46,6 +46,9 @@ image = (
         "whisperx",
         "pyannote.audio",
         "anthropic",
+        # Optional alternate LLM provider (Stage 3 / 3.5). Anthropic stays
+        # the default; google-genai is only used when LLM_PROVIDER=="gemini".
+        "google-genai",
         "numpy",
         "scipy",
         "python-dotenv",
@@ -85,6 +88,25 @@ volume = modal.Volume.from_name("whisper-models", create_if_missing=True)
 
 app = modal.App(APP_NAME)
 
+# ---------------------------------------------------------------------------
+# Secrets. Anthropic is the default provider, so the huggingface + anthropic
+# secrets are ALWAYS required (unchanged from before). The Gemini secret is
+# only attached when the deploy explicitly opts in via LLM_PROVIDER=="gemini"
+# — attaching a Secret.from_name for a secret that doesn't exist in the
+# workspace would fail the deploy, so we must NOT reference "gemini-secret"
+# on the default Anthropic path. This keeps the existing cloud deploy working
+# exactly as before while making Gemini available alongside Anthropic when
+# opted into.
+# ---------------------------------------------------------------------------
+import os as _os
+
+_SECRETS = [
+    modal.Secret.from_name("huggingface-secret"),
+    modal.Secret.from_name("anthropic-secret"),
+]
+if _os.getenv("LLM_PROVIDER", "anthropic").lower() == "gemini":
+    _SECRETS.append(modal.Secret.from_name("gemini-secret"))
+
 
 @app.function(
     image=image,
@@ -94,10 +116,7 @@ app = modal.App(APP_NAME)
     # diarization on long Bengali-heavy audio can spike well past the
     # 2 GB default).
     memory=16384,
-    secrets=[
-        modal.Secret.from_name("huggingface-secret"),
-        modal.Secret.from_name("anthropic-secret"),
-    ],
+    secrets=_SECRETS,
     volumes={"/cache": volume},
     timeout=3600,
 )
@@ -165,7 +184,7 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
     #     clean_segments is preserved as-is (the eval scores against it).
     interpretation["polished_segments"] = polish_segments(
         segments=interpretation.get("clean_segments") or [],
-        anthropic_client=interp._client,
+        llm_client=interp._llm,
     )
 
     # 5. Assemble the same output_data dict test_audio.py writes locally.

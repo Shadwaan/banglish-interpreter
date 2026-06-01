@@ -1,6 +1,9 @@
 whisperx
 openai-whisper
 anthropic
+# Optional alternate LLM provider for Stage 3 / 3.5 (opt-in via
+# LLM_PROVIDER=gemini). Anthropic remains the default.
+google-genai
 sounddevice
 scipy
 numpy
