@@ -27,8 +27,11 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")  # "anthropic" | "gemini"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# Current Gemini model used when LLM_PROVIDER == "gemini".
-GEMINI_MODEL = "gemini-2.5-pro"
+# Gemini model used when LLM_PROVIDER == "gemini". Env-configurable so the
+# model can be picked per environment/plan without a code change. Defaults to
+# gemini-2.5-flash, which is available on free-tier keys (gemini-2.5-pro is
+# limited to paid plans).
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Whisper settings
 WHISPER_MODEL = "small"
