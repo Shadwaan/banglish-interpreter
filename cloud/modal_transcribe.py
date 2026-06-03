@@ -101,11 +101,30 @@ app = modal.App(APP_NAME)
     volumes={"/cache": volume},
     timeout=3600,
 )
-def transcribe(audio_bytes: bytes, filename: str) -> dict:
+def transcribe(
+    audio_bytes: bytes | None = None,
+    filename: str | None = None,
+    *,
+    media_url: str | None = None,
+) -> dict:
     """
     Run the full pipeline (Stage 1 Whisper large-v3-turbo + Stage 2
-    diarization + Stage 3 Claude cleanup) on `audio_bytes` and return the
-    same JSON dict shape that test_audio.py writes locally.
+    diarization + Stage 3 Claude cleanup) and return the same JSON dict shape
+    that test_audio.py writes locally.
+
+    Input is supplied EITHER as raw bytes OR as a URL — exactly one:
+
+      - ``audio_bytes`` (+ ``filename``): the original path, unchanged.
+        Positional callers — ``fn.remote(media_bytes, filename)`` — behave
+        exactly as before.
+      - ``media_url`` (keyword-only) with ``audio_bytes=None``: the media is
+        stream-downloaded from the URL into ``/tmp/{filename}`` using stdlib
+        urllib (no image-dependency change).
+
+    ``filename`` is required at runtime (it drives the /tmp path + extension);
+    it only carries a ``None`` default so it can follow the now-optional
+    ``audio_bytes`` positionally. ``ValueError`` is raised if ``filename`` is
+    missing, if neither input is given, or if both are given.
     """
     import os
 
@@ -130,11 +149,29 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
     ):
         os.makedirs(sub, exist_ok=True)
 
-    # 1. Write the uploaded audio to a predictable local path.
+    # 1. Validate inputs and materialize the media to a predictable local
+    #    path. Exactly one of (audio_bytes, media_url) must be supplied;
+    #    filename is always required (it drives the tmp path + extension).
+    if not filename:
+        raise ValueError("filename is required (drives the /tmp path and extension).")
+    if audio_bytes is None and media_url is None:
+        raise ValueError("Provide either audio_bytes or media_url.")
+    if audio_bytes is not None and media_url is not None:
+        raise ValueError("Provide only ONE of audio_bytes or media_url, not both.")
+
     tmp_path = f"/tmp/{filename}"
     os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
-    with open(tmp_path, "wb") as f:
-        f.write(audio_bytes)
+    if media_url is not None:
+        # Stream-download with stdlib urllib — no image-dependency change.
+        import shutil
+        import urllib.request
+
+        req = urllib.request.Request(media_url, headers={"User-Agent": "banglish-cloud-transcriber"})
+        with urllib.request.urlopen(req, timeout=300) as resp, open(tmp_path, "wb") as f:
+            shutil.copyfileobj(resp, f)
+    else:
+        with open(tmp_path, "wb") as f:
+            f.write(audio_bytes)
 
     # 2. Whisper model size. v2 used large-v3-turbo, but its larger
     #    multilingual vocabulary is what introduced the Hindi-drift regression
