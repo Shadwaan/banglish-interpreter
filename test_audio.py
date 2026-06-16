@@ -132,7 +132,7 @@ def stage_interpret(
     interp: BanglishInterpreter,
 ) -> dict:
     header("STAGE 2 -- CLAUDE INTERPRETATION")
-    print("  Sending to Claude claude-sonnet-4 ...\n")
+    print("  Sending to Claude ...\n")
 
     t0 = time.time()
     data = interp.interpret(

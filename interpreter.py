@@ -2,14 +2,15 @@
 Claude-powered Banglish transcript interpreter.
 
 Takes a raw Whisper transcript and its low-confidence words, sends a
-structured prompt to Claude claude-opus-4-5, and returns a cleaned/reinterpreted
-version.  Maintains conversation history so the user can ask follow-up
-questions about the same transcript.
+structured prompt to Claude (current Sonnet 4.6 by default; see MODEL), and
+returns a cleaned/reinterpreted version.  Maintains conversation history so the
+user can ask follow-up questions about the same transcript.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
@@ -22,7 +23,9 @@ from banglish_hints import CLAUDE_REFERENCE
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-MODEL = "claude-sonnet-4-20250514"
+# Model id is env-overridable; defaults to current Sonnet 4.6. The previous
+# default (claude-sonnet-4-20250514) was retired by Anthropic on 2026-06-15.
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = 16384
 
 SYSTEM_PROMPT = f"""\
@@ -360,7 +363,7 @@ def _reconstruct_clean(
 
 class BanglishInterpreter:
     """
-    Stateful interpreter that talks to Claude claude-opus-4-5 about a Banglish
+    Stateful interpreter that talks to Claude (see MODEL) about a Banglish
     transcript and keeps conversation history for follow-ups.
     """
 

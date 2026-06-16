@@ -130,7 +130,7 @@ def main():
 
     # -- Send to Claude --
     header("STAGE 2 -- CLAUDE INTERPRETATION")
-    print("  Sending to Claude claude-opus-4-5 ...\n")
+    print("  Sending to Claude ...\n")
 
     interp = BanglishInterpreter()
     t0 = time.time()
